@@ -187,34 +187,116 @@ async function obtenerPlayersDesdeUrl(pageUrl) {
 
 /** Búsqueda rápida (JSON) */
 async function buscarSololatino(q) {
-  const url = BASE + '/api/search/suggest?q=' + encodeURIComponent(q);
-  const res = await fetch(url, {
+  q = String(q || '').trim();
+  if (!q) return { query: q, count: 0, results: [] };
+
+  // 1) API JSON (a veces 403 desde Workers)
+  try {
+    const apiUrl = BASE + '/api/search/suggest?q=' + encodeURIComponent(q);
+    const res = await fetch(apiUrl, {
+      headers: {
+        'User-Agent': UA,
+        Accept: 'application/json, text/plain, */*',
+        'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
+        'X-Requested-With': 'XMLHttpRequest',
+        Referer: BASE + '/',
+        Origin: BASE,
+      },
+    });
+    if (res.ok) {
+      const arr = await res.json();
+      if (Array.isArray(arr) && arr.length) {
+        const results = [];
+        for (let i = 0; i < arr.length; i++) {
+          const it = arr[i];
+          if (!it || it.type === 'person') continue;
+          let tipo = 'Pelicula';
+          if (it.type === 'series' || it.type === 'toon') tipo = 'Serie';
+          results.push({
+            title: it.title || null,
+            year: it.year || null,
+            type: tipo,
+            portada: it.poster || null,
+            url: it.url || null,
+            source: 'sololatino',
+          });
+        }
+        return { query: q, count: results.length, results };
+      }
+    }
+  } catch (_) {
+    /* fallback HTML */
+  }
+
+  // 2) Fallback: página /buscar?q=
+  const htmlUrl = BASE + '/buscar?q=' + encodeURIComponent(q);
+  const pageRes = await fetch(htmlUrl, {
     headers: {
       'User-Agent': UA,
-      Accept: 'application/json',
-      'X-Requested-With': 'XMLHttpRequest',
+      Accept: 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.8',
+      'Accept-Language': 'es-ES,es;q=0.9',
       Referer: BASE + '/',
     },
   });
-  if (!res.ok) throw new Error('Search HTTP ' + res.status);
-  const arr = await res.json();
-  if (!Array.isArray(arr)) return { query: q, count: 0, results: [] };
+  if (!pageRes.ok) {
+    throw new Error('Search HTTP ' + pageRes.status);
+  }
+  const html = await pageRes.text();
 
   const results = [];
-  for (let i = 0; i < arr.length; i++) {
-    const it = arr[i];
-    if (!it || it.type === 'person') continue;
-    let tipo = 'Pelicula';
-    if (it.type === 'series' || it.type === 'toon') tipo = 'Serie';
+  const seen = Object.create(null);
+
+  // enlaces /pelicula/ o /serie/
+  const re =
+    /href="(https:\/\/sololatino\.net\/(pelicula|serie)\/([a-z0-9\-]+))"[\s\S]{0,400}?>([^<]{2,120})</gi;
+  let m;
+  while ((m = re.exec(html))) {
+    const link = m[1];
+    const kind = m[2].toLowerCase();
+    const slug = m[3];
+    if (seen[slug]) continue;
+    seen[slug] = 1;
+    const title = m[4].replace(/\s+/g, ' ').trim();
+    if (!title || title.length < 2) continue;
     results.push({
-      title: it.title || null,
-      year: it.year || null,
-      type: tipo,
-      portada: it.poster || null,
-      url: it.url || null,
+      title,
+      slug,
+      type: kind === 'serie' ? 'Serie' : 'Pelicula',
+      url: link,
       source: 'sololatino',
     });
   }
+
+  // si el regex de título falló, al menos por href
+  if (!results.length) {
+    const re2 =
+      /href="(https:\/\/sololatino\.net\/(pelicula|serie)\/([a-z0-9\-]+))"/gi;
+    while ((m = re2.exec(html))) {
+      const slug = m[3];
+      if (seen[slug]) continue;
+      seen[slug] = 1;
+      results.push({
+        title: slug.replace(/-/g, ' '),
+        slug,
+        type: m[2].toLowerCase() === 'serie' ? 'Serie' : 'Pelicula',
+        url: m[1],
+        source: 'sololatino',
+      });
+    }
+  }
+
+  // portadas cercanas (opcional)
+  for (let i = 0; i < results.length; i++) {
+    const slug = results[i].slug;
+    if (!slug) continue;
+    const reImg = new RegExp(
+      slug + '[\\s\\S]{0,300}?(?:src|data-src)="(https://[^"]+(?:tmdb|poster|image)[^"]*)"',
+      'i'
+    );
+    const im = html.match(reImg);
+    if (im) results[i].portada = im[1];
+  }
+
   return { query: q, count: results.length, results };
 }
 
